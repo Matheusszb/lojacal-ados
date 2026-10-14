@@ -24,9 +24,9 @@ export async function POST(request: Request) {
       quantities.set(variantId, (quantities.get(variantId) ?? 0) + quantity);
     }
     const ids = [...quantities.keys()];
-    const rows = await all(`SELECT v.id, v.color, v.size, v.stock, p.name, p.price_cents, p.sale_price_cents, p.active FROM variants v JOIN products p ON p.id=v.product_id WHERE v.id IN (${ids.map(() => "?").join(",")})`, ...ids);
+    const rows = await all(`SELECT v.id, v.color, v.size, v.stock, p.name, p.price_cents, p.sale_price_cents, p.active, c.active AS category_active FROM variants v JOIN products p ON p.id=v.product_id LEFT JOIN categories c ON c.id=p.category_id WHERE v.id IN (${ids.map(() => "?").join(",")})`, ...ids);
     if (rows.length !== ids.length) return fail("Um produto do carrinho não está mais disponível.", 409);
-    for (const row of rows) if (!row.active || row.stock < quantities.get(row.id)!) return fail(`Estoque insuficiente para ${row.name}, ${row.color}, ${row.size}.`, 409);
+    for (const row of rows) if (!row.active || row.category_active === 0 || row.stock < quantities.get(row.id)!) return fail(`Produto indisponível: ${row.name}, ${row.color}, ${row.size}.`, 409);
     const total = rows.reduce((sum, row) => sum + (row.sale_price_cents ?? row.price_cents) * quantities.get(row.id)!, 0);
     const orderId = id(), timestamp = now();
     // D1 batch commits the order and its line items as one transaction. Stock changes only on confirmation.

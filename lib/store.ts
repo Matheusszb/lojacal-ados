@@ -43,7 +43,7 @@ export async function getSettings() {
 
 export async function getCatalog(admin = false) {
   const [products, variants, images, categories, banners, settings] = await Promise.all([
-    all(`SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM products p LEFT JOIN categories c ON c.id=p.category_id ${admin ? "" : "WHERE p.active=1"} ORDER BY p.created_at DESC`),
+    all(`SELECT p.*, c.name AS category_name, c.slug AS category_slug FROM products p LEFT JOIN categories c ON c.id=p.category_id ${admin ? "" : "WHERE p.active=1 AND (p.category_id IS NULL OR c.active=1)"} ORDER BY p.created_at DESC`),
     all("SELECT * FROM variants ORDER BY color, size"),
     all("SELECT * FROM product_images ORDER BY sort"),
     all(`SELECT * FROM categories ${admin ? "" : "WHERE active=1"} ORDER BY sort, name`),

@@ -29,7 +29,7 @@ export const orders = sqliteTable("orders", {
   customerName: text("customer_name").notNull(), phone: text("phone").notNull(), fulfillment: text("fulfillment").notNull(),
   notes: text("notes").notNull().default(""), totalCents: integer("total_cents").notNull(),
   status: text("status").notNull().default("pending"), source: text("source").notNull().default("online"),
-  createdAt: text("created_at").notNull(), confirmedAt: text("confirmed_at"),
+  paymentMethod: text("payment_method"), createdAt: text("created_at").notNull(), confirmedAt: text("confirmed_at"),
 });
 export const orderItems = sqliteTable("order_items", {
   id: text("id").primaryKey(), orderId: text("order_id").notNull().references(() => orders.id),

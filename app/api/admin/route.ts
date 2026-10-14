@@ -8,13 +8,16 @@ export async function GET() {
   try {
     const user = await requireAdmin();
     if (!user) return fail("Acesso restrito ao administrador.", 403);
-    const [catalog, orders, movements] = await Promise.all([
+    const month = now().slice(0, 7);
+    const [catalog, orders, movements, metrics, monthlySales] = await Promise.all([
       getCatalog(true),
       all("SELECT * FROM orders ORDER BY created_at DESC LIMIT 200"),
       all("SELECT m.*, v.sku, p.name AS product_name FROM stock_movements m JOIN variants v ON v.id=m.variant_id JOIN products p ON p.id=v.product_id ORDER BY m.created_at DESC LIMIT 100"),
+      first("SELECT (SELECT COUNT(*) FROM orders) AS order_count, (SELECT COUNT(*) FROM orders WHERE status='pending') AS pending_count, (SELECT COUNT(*) FROM orders WHERE status IN ('confirmed','separating','ready','completed')) AS sale_count, (SELECT COALESCE(SUM(total_cents),0) FROM orders WHERE status IN ('confirmed','separating','ready','completed') AND substr(COALESCE(confirmed_at,created_at),1,7)=?) AS revenue_month", month),
+      all("SELECT substr(COALESCE(confirmed_at,created_at),1,7) AS month, COUNT(*) AS sales, SUM(total_cents) AS revenue FROM orders WHERE status IN ('confirmed','separating','ready','completed') GROUP BY month ORDER BY month DESC LIMIT 12"),
     ]);
     const items = orders.length ? await all(`SELECT * FROM order_items WHERE order_id IN (${orders.map(() => "?").join(",")})`, ...orders.map((o) => o.id)) : [];
-    return json({ ...catalog, orders: orders.map((o) => ({ ...o, items: items.filter((i) => i.order_id === o.id) })), movements, admin: { name: user.displayName, email: user.email } });
+    return json({ ...catalog, orders: orders.map((o) => ({ ...o, items: items.filter((i) => i.order_id === o.id) })), movements, metrics, monthlySales, admin: { name: user.displayName, email: user.email } });
   } catch (error) { console.error(error); return fail("Não foi possível carregar o painel.", 500); }
 }
 
@@ -107,10 +110,20 @@ export async function POST(request: Request) {
       const variantIds = [...quantities.keys()];
       const rows = await all(`SELECT v.id,v.color,v.size,v.stock,p.name,p.price_cents,p.sale_price_cents FROM variants v JOIN products p ON p.id=v.product_id WHERE v.id IN (${variantIds.map(() => "?").join(",")})`, ...variantIds);
       if (rows.length !== variantIds.length || rows.some((row) => row.stock < quantities.get(row.id)!)) return fail("Estoque insuficiente para a venda.", 409);
-      const saleId = id(), total = rows.reduce((sum, row) => sum + (row.sale_price_cents ?? row.price_cents) * quantities.get(row.id)!, 0);
+      const prices = new Map<string, number>();
+      for (const item of selected) {
+        const variantId = clean(item.variantId, 60);
+        const listed = rows.find((row) => row.id === variantId);
+        const price = item.unitPriceCents === undefined ? listed?.sale_price_cents ?? listed?.price_cents : int(item.unitPriceCents);
+        if (!Number.isInteger(price) || price < 1 || price > 100000000 || (prices.has(variantId) && prices.get(variantId) !== price)) return fail("Informe um valor válido e único por variação.");
+        prices.set(variantId, price);
+      }
+      const paymentMethod = clean(body.paymentMethod, 20);
+      if (!["cash", "pix", "credit", "debit", "other"].includes(paymentMethod)) return fail("Escolha a forma de pagamento.");
+      const saleId = id(), total = rows.reduce((sum, row) => sum + prices.get(row.id)! * quantities.get(row.id)!, 0);
       const statements = [
-        db().prepare("INSERT INTO orders (id,number,customer_name,phone,fulfillment,notes,total_cents,status,source,created_at) VALUES (?,(SELECT COALESCE(MAX(number),0)+1 FROM orders),?,?,?,'',?,'pending','in_person',?)").bind(saleId, clean(body.customerName, 100) || "Venda presencial", clean(body.phone, 25), "pickup", total, timestamp),
-        ...rows.map((row) => db().prepare("INSERT INTO order_items (id,order_id,variant_id,product_name,color,size,quantity,unit_price_cents) VALUES (?,?,?,?,?,?,?,?)").bind(id(), saleId, row.id, row.name, row.color, row.size, quantities.get(row.id)!, row.sale_price_cents ?? row.price_cents)),
+        db().prepare("INSERT INTO orders (id,number,customer_name,phone,fulfillment,notes,total_cents,status,source,payment_method,created_at) VALUES (?,(SELECT COALESCE(MAX(number),0)+1 FROM orders),?,?,?,'',?,'pending','in_person',?,?)").bind(saleId, clean(body.customerName, 100) || "Venda presencial", clean(body.phone, 25), "pickup", total, paymentMethod, timestamp),
+        ...rows.map((row) => db().prepare("INSERT INTO order_items (id,order_id,variant_id,product_name,color,size,quantity,unit_price_cents) VALUES (?,?,?,?,?,?,?,?)").bind(id(), saleId, row.id, row.name, row.color, row.size, quantities.get(row.id)!, prices.get(row.id)!)),
         db().prepare("UPDATE variants SET stock=stock-(SELECT quantity FROM order_items WHERE order_id=? AND variant_id=variants.id) WHERE id IN (SELECT variant_id FROM order_items WHERE order_id=?) AND (SELECT COUNT(*) FROM order_items oi JOIN variants vv ON vv.id=oi.variant_id WHERE oi.order_id=? AND vv.stock>=oi.quantity)=(SELECT COUNT(*) FROM order_items WHERE order_id=?)").bind(saleId, saleId, saleId, saleId),
         db().prepare("UPDATE orders SET status='confirmed',confirmed_at=? WHERE id=? AND changes()=(SELECT COUNT(*) FROM order_items WHERE order_id=?)").bind(timestamp, saleId, saleId),
         db().prepare("INSERT INTO stock_movements (id,variant_id,delta,reason,reference,actor_id,created_at) SELECT lower(hex(randomblob(16))),variant_id,-quantity,'sale',?,?,? FROM order_items WHERE order_id=? AND EXISTS (SELECT 1 FROM orders WHERE id=? AND status='confirmed')").bind(saleId, user.userId, timestamp, saleId, saleId),
@@ -119,11 +132,18 @@ export async function POST(request: Request) {
       if (!results[results.length - 2].meta.changes) { await run("UPDATE orders SET status='cancelled' WHERE id=? AND status='pending'", saleId); return fail("O estoque mudou. A venda não foi confirmada.", 409); }
       return json({ ok: true, id: saleId });
     }
+    if (action === "advanceOrder") {
+      const orderId = clean(body.orderId, 60), next = clean(body.status, 25);
+      const previous: Record<string, string> = { separating: "confirmed", ready: "separating", completed: "ready" };
+      if (!previous[next]) return fail("Etapa inválida.");
+      const result = await run("UPDATE orders SET status=? WHERE id=? AND status=? AND source='online'", next, orderId, previous[next]);
+      return result.meta.changes ? json({ ok: true }) : fail("Este pedido já mudou de etapa.", 409);
+    }
     if (action === "reverseSale") {
       const orderId = clean(body.orderId, 60);
       const results = await db().batch([
-        db().prepare("UPDATE variants SET stock=stock+(SELECT quantity FROM order_items WHERE order_id=? AND variant_id=variants.id) WHERE id IN (SELECT variant_id FROM order_items WHERE order_id=?) AND EXISTS (SELECT 1 FROM orders WHERE id=? AND status='confirmed')").bind(orderId, orderId, orderId),
-        db().prepare("UPDATE orders SET status='cancelled' WHERE id=? AND status='confirmed' AND changes()=(SELECT COUNT(*) FROM order_items WHERE order_id=?)").bind(orderId, orderId),
+        db().prepare("UPDATE variants SET stock=stock+(SELECT quantity FROM order_items WHERE order_id=? AND variant_id=variants.id) WHERE id IN (SELECT variant_id FROM order_items WHERE order_id=?) AND EXISTS (SELECT 1 FROM orders WHERE id=? AND status IN ('confirmed','separating','ready','completed'))").bind(orderId, orderId, orderId),
+        db().prepare("UPDATE orders SET status='cancelled' WHERE id=? AND status IN ('confirmed','separating','ready','completed') AND changes()=(SELECT COUNT(*) FROM order_items WHERE order_id=?)").bind(orderId, orderId),
         db().prepare("INSERT INTO stock_movements (id,variant_id,delta,reason,reference,actor_id,created_at) SELECT lower(hex(randomblob(16))),variant_id,quantity,'reversal',?,?,? FROM order_items WHERE order_id=? AND EXISTS (SELECT 1 FROM orders WHERE id=? AND status='cancelled') AND NOT EXISTS (SELECT 1 FROM stock_movements WHERE reference=? AND reason='reversal')").bind(orderId, user.userId, timestamp, orderId, orderId, orderId),
       ]);
       if (!results[1].meta.changes) return fail("Esta venda não pode ser estornada.", 409);

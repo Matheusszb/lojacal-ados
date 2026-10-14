@@ -8,6 +8,13 @@
       "when": 1791988948265,
       "tag": "0000_little_psynapse",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1791991699397,
+      "tag": "0001_next_omega_sentinel",
+      "breakpoints": true
     }
   ]
 }
