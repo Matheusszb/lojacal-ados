@@ -1,10 +1,7 @@
-import { env } from "cloudflare:workers";
+import { db } from "@/lib/database";
 
 export type Row = Record<string, any>;
-export const db = () => {
-  if (!env.DB) throw new Error("Banco de dados indisponível");
-  return env.DB;
-};
+export { db };
 export const now = () => new Date().toISOString();
 export const id = () => crypto.randomUUID();
 export const clean = (value: unknown, max = 180) => String(value ?? "").trim().slice(0, max);

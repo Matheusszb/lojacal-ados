@@ -1,11 +1,14 @@
-import { getChatGPTUser } from "@/app/chatgpt-auth";
-import { first, id, now, run } from "@/lib/store";
+import { createClient } from "@/lib/supabase/server";
+import { first, now, run } from "@/lib/store";
 
 export async function requireAdmin() {
-  const user = await getChatGPTUser();
-  if (!user) return null;
-  // A new Site starts owner-private. Its first signed-in owner claims the admin role.
-  await run("INSERT INTO admins (user_id,email,created_at) SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM admins)", user.userId, user.email, now());
-  const admin = await first("SELECT user_id FROM admins WHERE user_id=?", user.userId);
-  return admin ? user : null;
+  const allowedEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+  if (!allowedEmail) return null;
+  const supabase = await createClient();
+  const { data: { user }, error } = await supabase.auth.getUser();
+  if (error || !user?.email || !user.email_confirmed_at || user.email.toLowerCase() !== allowedEmail) return null;
+  // Only the verified configured email can claim the administrator row.
+  await run("INSERT INTO admins (user_id,email,created_at) VALUES (?,?,?) ON CONFLICT(user_id) DO NOTHING", user.id, user.email, now());
+  const admin = await first("SELECT user_id FROM admins WHERE user_id=?", user.id);
+  return admin ? { userId: user.id, email: user.email, displayName: user.user_metadata?.full_name || user.email } : null;
 }
