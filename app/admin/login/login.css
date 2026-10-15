@@ -1,0 +1,12 @@
+.admin-login-page{min-height:100vh;display:grid;place-items:center;padding:28px 16px;background:#f7f7f5}
+.admin-login-card{width:min(420px,100%);background:#fff;border:1px solid var(--line);padding:38px;display:flex;flex-direction:column;gap:18px;box-shadow:0 18px 45px #0000000b}
+.admin-login-card>a:first-child{align-self:center}
+.admin-login-card img{width:100px;height:100px;object-fit:contain}
+.admin-login-card .eyebrow{text-align:center}
+.admin-login-card h1{font-family:'Playfair Display',Georgia,serif;font-size:32px;font-weight:500;text-align:center;margin:0 0 6px}
+.admin-login-card label{display:flex;flex-direction:column;gap:7px;font-size:12px;font-weight:700}
+.admin-login-card input{border:1px solid var(--line);min-height:43px;padding:10px 12px;font-size:14px;outline-color:var(--gold)}
+.admin-login-card .admin-primary{width:100%;min-height:44px}
+.admin-login-card .admin-link{justify-content:center}
+.admin-login-error{font-size:12px;color:#a33;margin:0}
+@media(max-width:650px){.admin-login-card{padding:28px 22px}}

@@ -1,0 +1,5 @@
+.sale-item-fields{grid-template-columns:minmax(180px,1fr) 70px 125px auto}
+.sale-item-fields>label{min-width:0}
+.admin-logout{margin:0 22px 24px;border:0;background:none;color:var(--muted);font-size:11px;text-align:left;cursor:pointer}
+.admin-logout:hover{color:var(--gold)}
+@media(max-width:650px){.sale-item-fields{grid-template-columns:minmax(0,1fr) 70px}.sale-item-fields>label:first-child{grid-column:1/-1}.sale-item-fields>.admin-link{grid-column:1/-1;justify-content:flex-start;margin:0 0 12px}}

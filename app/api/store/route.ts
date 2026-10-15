@@ -29,9 +29,9 @@ export async function POST(request: Request) {
     for (const row of rows) if (!row.active || row.category_active === 0 || row.stock < quantities.get(row.id)!) return fail(`Produto indisponível: ${row.name}, ${row.color}, ${row.size}.`, 409);
     const total = rows.reduce((sum, row) => sum + (row.sale_price_cents ?? row.price_cents) * quantities.get(row.id)!, 0);
     const orderId = id(), timestamp = now();
-    // D1 batch commits the order and its line items as one transaction. Stock changes only on confirmation.
+    // Commit the order and its items together. Stock changes on confirmation.
     const statements = [
-      db().prepare("INSERT INTO orders (id,number,customer_name,phone,fulfillment,notes,total_cents,status,source,created_at) VALUES (?,(SELECT COALESCE(MAX(number),0)+1 FROM orders),?,?,?,?,?,'pending','online',?)").bind(orderId, name, phone, fulfillment, notes, total, timestamp),
+      db().prepare("INSERT INTO orders (id,number,customer_name,phone,fulfillment,notes,total_cents,status,source,created_at) VALUES (?,nextval('order_number_seq'),?,?,?,?,?,'pending','online',?)").bind(orderId, name, phone, fulfillment, notes, total, timestamp),
       ...rows.map((row) => db().prepare("INSERT INTO order_items (id,order_id,variant_id,product_name,color,size,quantity,unit_price_cents) VALUES (?,?,?,?,?,?,?,?)").bind(id(), orderId, row.id, row.name, row.color, row.size, quantities.get(row.id)!, row.sale_price_cents ?? row.price_cents)),
     ];
     await db().batch(statements);
