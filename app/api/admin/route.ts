@@ -1,4 +1,5 @@
 import { requireAdmin } from "@/lib/admin";
+import { StaleDataError } from "@/lib/database";
 import { all, clean, db, fail, first, getCatalog, getSettings, id, json, now, run, slugify } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -61,19 +62,33 @@ export async function POST(request: Request) {
       if (!variants.length || variants.length > 80) return fail("Cadastre ao menos uma cor e numeração.");
       const existing = await first("SELECT id,created_at FROM products WHERE id=?", productId);
       if (!existing && variants.some((v: any) => v.id)) return fail("Variação inválida para novo produto.");
-      const normalized = variants.map((v: any) => ({ id: clean(v.id, 60) || id(), color: clean(v.color, 50), size: clean(v.size, 12), sku: clean(v.sku, 80), stock: int(v.stock), minStock: int(v.minStock) }));
-      if (normalized.some((v) => !v.color || !v.size || !v.sku || !Number.isInteger(v.stock) || v.stock < 0 || !Number.isInteger(v.minStock) || v.minStock < 0)) return fail("Confira SKU, cor, numeração e estoque das variações.");
+      const normalized = variants.map((v: any) => {
+        const existingId = clean(v.id, 60);
+        return {
+          id: existingId || id(),
+          isExisting: !!existingId,
+          color: clean(v.color, 50),
+          size: clean(v.size, 12),
+          sku: clean(v.sku, 80) || (!existingId ? `LC-${id().replaceAll("-", "").slice(0, 16).toUpperCase()}` : ""),
+          stock: v.stock === "" ? NaN : int(v.stock),
+          originalStock: existingId ? int(v.originalStock) : 0,
+          minStock: v.minStock == null ? 2 : int(v.minStock),
+        };
+      });
+      if (normalized.some((v) => !v.color || !v.size || !v.sku || !Number.isInteger(v.stock) || v.stock < 0 || !Number.isInteger(v.originalStock) || v.originalStock < 0 || !Number.isInteger(v.minStock) || v.minStock < 0)) return fail("Confira cor, numeração e quantidade das variações.");
       if (new Set(normalized.map((v) => `${v.color.toLowerCase()}|${v.size}`)).size !== normalized.length || new Set(normalized.map((v) => v.sku)).size !== normalized.length) return fail("Variações ou SKUs duplicados.");
       if (existing) {
-        for (const v of normalized.filter((v) => body.variants.some((x: any) => x.id === v.id))) {
+        for (const v of normalized.filter((v) => v.isExisting)) {
           const row = await first("SELECT id FROM variants WHERE id=? AND product_id=?", v.id, productId);
           if (!row) return fail("Variação inválida.");
         }
       }
       const statements = [
         db().prepare("INSERT INTO products (id,name,slug,brand,category_id,description,price_cents,sale_price_cents,active,featured,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,slug=excluded.slug,brand=excluded.brand,category_id=excluded.category_id,description=excluded.description,price_cents=excluded.price_cents,sale_price_cents=excluded.sale_price_cents,active=excluded.active,featured=excluded.featured,updated_at=excluded.updated_at").bind(productId, name, slug, brand, categoryId, clean(body.description, 4000), price, sale, body.active ? 1 : 0, body.featured ? 1 : 0, existing?.created_at ?? timestamp, timestamp),
-        ...normalized.map((v) => db().prepare("INSERT INTO variants (id,product_id,sku,color,size,stock,min_stock) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sku=excluded.sku,color=excluded.color,size=excluded.size,min_stock=excluded.min_stock").bind(v.id, productId, v.sku, v.color, v.size, v.stock, v.minStock)),
-        ...normalized.filter((v) => !body.variants.some((x: any) => x.id === v.id)).filter((v) => v.stock > 0).map((v) => db().prepare("INSERT INTO stock_movements (id,variant_id,delta,reason,reference,actor_id,created_at) VALUES (?,?,?,?,?,?,?)").bind(id(), v.id, v.stock, "initial", productId, user.userId, timestamp)),
+        ...normalized.map((v) => v.isExisting
+          ? db().prepare("UPDATE variants SET sku=?,color=?,size=?,stock=?,min_stock=? WHERE id=? AND product_id=? AND stock=?").bind(v.sku, v.color, v.size, v.stock, v.minStock, v.id, productId, v.originalStock).expectChanges(1)
+          : db().prepare("INSERT INTO variants (id,product_id,sku,color,size,stock,min_stock) VALUES (?,?,?,?,?,?,?)").bind(v.id, productId, v.sku, v.color, v.size, v.stock, v.minStock)),
+        ...normalized.filter((v) => v.stock !== v.originalStock).map((v) => db().prepare("INSERT INTO stock_movements (id,variant_id,delta,reason,reference,actor_id,created_at) VALUES (?,?,?,?,?,?,?)").bind(id(), v.id, v.stock - v.originalStock, v.isExisting ? "product_edit" : "initial", productId, user.userId, timestamp)),
         db().prepare("DELETE FROM product_images WHERE product_id=?").bind(productId),
         ...(Array.isArray(body.images) ? body.images.slice(0, 8) : []).filter((x: any) => typeof x.key === "string" && x.key.startsWith("product/")).map((x: any, index: number) => db().prepare("INSERT INTO product_images (id,product_id,key,alt,sort) VALUES (?,?,?,?,?)").bind(id(), productId, x.key, clean(x.alt, 180) || name, index)),
       ];
@@ -154,5 +169,9 @@ export async function POST(request: Request) {
       return result.meta.changes ? json({ ok: true }) : fail("Somente pedidos pendentes podem ser cancelados.", 409);
     }
     return fail("Ação inválida.");
-  } catch (error) { console.error(error); return fail("Não foi possível salvar. Confira os dados e tente novamente.", 500); }
+  } catch (error) {
+    if (error instanceof StaleDataError) return fail("O estoque mudou. Atualize o painel e tente novamente.", 409);
+    console.error(error);
+    return fail("Não foi possível salvar. Confira os dados e tente novamente.", 500);
+  }
 }

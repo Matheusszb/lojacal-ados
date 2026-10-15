@@ -3,6 +3,8 @@ import { Pool, type PoolClient, type QueryResult } from "pg";
 type Values = unknown[];
 type Result = { results: Record<string, unknown>[]; meta: { changes: number } };
 
+export class StaleDataError extends Error {}
+
 let pool: Pool | undefined;
 function connection() {
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL não configurada.");
@@ -20,8 +22,10 @@ function postgresSql(source: string, priorChanges = 0) {
 
 class Statement {
   values: Values = [];
+  expectedChanges?: number;
   constructor(readonly text: string) {}
   bind(...values: Values) { this.values = values; return this; }
+  expectChanges(count: number) { this.expectedChanges = count; return this; }
   async execute(client?: PoolClient, priorChanges = 0): Promise<Result> {
     const query = postgresSql(this.text, priorChanges);
     const result: QueryResult = await (client ?? connection()).query(query, this.values);
@@ -41,7 +45,11 @@ export function db() {
         await client.query("BEGIN");
         const results: Result[] = [];
         for (const statement of statements) {
-          results.push(await statement.execute(client, results.at(-1)?.meta.changes ?? 0));
+          const result = await statement.execute(client, results.at(-1)?.meta.changes ?? 0);
+          if (statement.expectedChanges !== undefined && result.meta.changes !== statement.expectedChanges) {
+            throw new StaleDataError("O estoque foi alterado por outra operação.");
+          }
+          results.push(result);
         }
         await client.query("COMMIT");
         return results;
